@@ -15,56 +15,76 @@ const model = genai.getGenerativeModel({
 ถ้าไม่รู้หรือไม่แน่ใจให้บอกตรงๆ อย่าเดา`,
 });
 
-// ---- เก็บ log รายวัน ----
-const dailyLogs = [];
+// ---- เก็บ log พร้อม timestamp ----
+const logs = []; // { timestamp: Date, userId, userText, aiReply }
 
 function addLog(userId, userText, aiReply) {
-  const time = new Date().toLocaleTimeString("th-TH", { timeZone: "Asia/Bangkok" });
-  dailyLogs.push({ time, userId, userText, aiReply: aiReply.slice(0, 60) + (aiReply.length > 60 ? "..." : "") });
+  logs.push({
+    timestamp: new Date(),
+    userId,
+    userText,
+    aiReply: aiReply.slice(0, 80) + (aiReply.length > 80 ? "..." : ""),
+  });
+  // เก็บแค่ 7 วันย้อนหลัง
+  const limit = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  while (logs.length > 0 && logs[0].timestamp.getTime() < limit) logs.shift();
 }
 
-// ---- Push message หา admin ----
+function formatTime(date) {
+  return date.toLocaleTimeString("th-TH", { timeZone: "Asia/Bangkok", hour: "2-digit", minute: "2-digit" });
+}
+
+function formatDate(date) {
+  return date.toLocaleDateString("th-TH", { timeZone: "Asia/Bangkok", day: "numeric", month: "long", year: "numeric" });
+}
+
+function buildReport(filteredLogs, title) {
+  if (filteredLogs.length === 0) return `${title}\n\nไม่มีการสนทนาครับ`;
+  const userCount = new Set(filteredLogs.map((l) => l.userId)).size;
+  const lines = filteredLogs
+    .map((l) => `🕐 ${formatTime(l.timestamp)}\n💬 ${l.userText}\n🤖 ${l.aiReply}`)
+    .join("\n─────────\n");
+  return `${title}\n👥 ${userCount} คน | 💬 ${filteredLogs.length} ข้อความ\n\n${lines}`;
+}
+
+// ---- Push message หา admin (แบ่งถ้ายาวเกิน) ----
 async function pushToAdmin(text) {
   const adminId = process.env.ADMIN_USER_ID;
   if (!adminId) return;
-  await fetch("https://api.line.me/v2/bot/message/push", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
-    },
-    body: JSON.stringify({
-      to: adminId,
-      messages: [{ type: "text", text }],
-    }),
-  });
+
+  // Line รับได้สูงสุด 5000 ตัวอักษรต่อข้อความ
+  const chunks = [];
+  while (text.length > 4800) {
+    const cut = text.lastIndexOf("\n─────────\n", 4800);
+    chunks.push(text.slice(0, cut > 0 ? cut : 4800));
+    text = text.slice(cut > 0 ? cut + 11 : 4800);
+  }
+  chunks.push(text);
+
+  for (const chunk of chunks) {
+    await fetch("https://api.line.me/v2/bot/message/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+      },
+      body: JSON.stringify({ to: adminId, messages: [{ type: "text", text: chunk }] }),
+    });
+  }
 }
 
-// ---- รายงานทุกวัน 08:00 น. (UTC+7) ----
+// ---- รายงานอัตโนมัติทุกวัน 08:00 น. ----
 function scheduleDailyReport() {
   const now = new Date();
   const next = new Date();
-  // 08:00 น. ไทย = 01:00 UTC
-  next.setUTCHours(1, 0, 0, 0);
+  next.setUTCHours(1, 0, 0, 0); // 08:00 ไทย = 01:00 UTC
   if (next <= now) next.setDate(next.getDate() + 1);
 
   setTimeout(async () => {
-    const date = new Date().toLocaleDateString("th-TH", {
-      timeZone: "Asia/Bangkok",
-      day: "numeric", month: "long", year: "numeric",
-    });
-
-    let report;
-    if (dailyLogs.length === 0) {
-      report = `📊 รายงานประจำวัน ${date}\n\nไม่มีการสนทนาเมื่อวานครับ`;
-    } else {
-      const userCount = new Set(dailyLogs.map((l) => l.userId)).size;
-      const lines = dailyLogs.map((l) => `🕐 ${l.time}\n💬 ${l.userText}\n🤖 ${l.aiReply}`).join("\n─────────\n");
-      report = `📊 รายงานประจำวัน ${date}\n👥 ผู้ใช้ ${userCount} คน | 💬 ${dailyLogs.length} ข้อความ\n\n${lines}`;
-    }
-
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const todayLogs = logs.filter((l) => l.timestamp >= since);
+    const report = buildReport(todayLogs, `📊 รายงานประจำวัน ${formatDate(new Date())}`);
     await pushToAdmin(report);
-    dailyLogs.length = 0;
     scheduleDailyReport();
   }, next - now);
 }
@@ -87,24 +107,22 @@ app.post("/webhook", async (req, res) => {
     if (event.type !== "message" || event.message.type !== "text") continue;
 
     const userId = event.source.userId;
-    const userText = event.message.text;
+    const userText = event.message.text.trim();
     const replyToken = event.replyToken;
+    const isAdmin = userId === process.env.ADMIN_USER_ID;
 
-    console.log(`[userId: ${userId}] ${userText}`);
+    console.log(`[${userId}] ${userText}`);
 
-    // คำสั่งพิเศษ: ส่ง "รายงาน" เพื่อดู log ทันที
-    if (userText === "รายงาน" && userId === process.env.ADMIN_USER_ID) {
-      const date = new Date().toLocaleDateString("th-TH", {
-        timeZone: "Asia/Bangkok", day: "numeric", month: "long", year: "numeric",
-      });
-      const report = dailyLogs.length === 0
-        ? `📊 รายงานวันนี้ ${date}\n\nยังไม่มีการสนทนาครับ`
-        : `📊 รายงานวันนี้ ${date}\n👥 ผู้ใช้ ${new Set(dailyLogs.map(l => l.userId)).size} คน | 💬 ${dailyLogs.length} ข้อความ\n\n` +
-          dailyLogs.map(l => `🕐 ${l.time}\n💬 ${l.userText}\n🤖 ${l.aiReply}`).join("\n─────────\n");
-      await replyToLine(replyToken, report);
+    // ---- คำสั่งพิเศษ (admin เท่านั้น) ----
+    if (isAdmin && userText === "รายงาน") {
+      const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const recent = logs.filter((l) => l.timestamp >= since);
+      const report = buildReport(recent, `📊 รายงานย้อนหลัง 24 ชม. (${formatDate(new Date())})`);
+      await replyToLine(replyToken, report.slice(0, 4800));
       continue;
     }
 
+    // ---- สนทนาปกติ ----
     try {
       const history = getHistory(userId);
       const chat = model.startChat({ history });
@@ -131,10 +149,7 @@ async function replyToLine(replyToken, text) {
       "Content-Type": "application/json",
       Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
     },
-    body: JSON.stringify({
-      replyToken,
-      messages: [{ type: "text", text }],
-    }),
+    body: JSON.stringify({ replyToken, messages: [{ type: "text", text }] }),
   });
 }
 
