@@ -12,7 +12,8 @@ const model = genai.getGenerativeModel({
   systemInstruction: `คุณเป็น AI ผู้ช่วยชายของครอบครัว ตอบภาษาไทยเป็นกันเอง ใช้คำลงท้าย "ครับ" เสมอ
 เชี่ยวชาญเรื่องเกษตร พืชผัก ปุ๋ย ยาฆ่าแมลง การทำสวน
 ตอบเรื่องทั่วไปได้ด้วย เช่น สุขภาพ ข่าวสาร คำแนะนำต่างๆ
-ถ้าไม่รู้หรือไม่แน่ใจให้บอกตรงๆ อย่าเดา`,
+ถ้าไม่รู้หรือไม่แน่ใจให้บอกตรงๆ อย่าเดา
+ตอบสั้นๆ กระชับ ได้ใจความ ไม่เกิน 5-6 บรรทัด`,
 });
 
 // ---- เก็บ log พร้อม timestamp ----
@@ -108,6 +109,9 @@ function scheduleDailyReport() {
 
 scheduleDailyReport();
 
+// ---- เก็บรูปรอคำถามแยกต่อ user ----
+const pendingImages = new Map();
+
 // ---- เก็บประวัติสนทนาแยกต่อ user ----
 const chatHistory = new Map();
 
@@ -138,21 +142,15 @@ app.post("/webhook", async (req, res) => {
     const replyToken = event.replyToken;
     const isAdmin = userId === process.env.ADMIN_USER_ID;
 
-    // ---- รูปภาพ ----
+    // ---- รูปภาพ: เก็บไว้รอคำถาม ----
     if (msgType === "image") {
       try {
         const base64 = await downloadImage(event.message.id);
-        const result = await model.generateContent([
-          { inlineData: { data: base64, mimeType: "image/jpeg" } },
-          { text: "ช่วยวิเคราะห์รูปนี้ให้หน่อยครับ บอกว่าเห็นอะไร มีปัญหาอะไรมั้ย และมีคำแนะนำอะไรบ้างครับ" },
-        ]);
-        const aiReply = result.response.text();
-        const displayName = await getDisplayName(userId);
-        addLog(userId, displayName, "[ส่งรูปภาพ]", aiReply);
-        await replyToLine(replyToken, aiReply);
+        pendingImages.set(userId, base64);
+        await replyToLine(replyToken, "รับรูปแล้วครับ 📷 อยากถามเรื่องอะไรเกี่ยวกับรูปนี้ครับ?");
       } catch (err) {
         console.error("Image error:", err.message);
-        await replyToLine(replyToken, "ขอโทษนะครับ วิเคราะห์รูปไม่ได้ ลองใหม่อีกครั้งได้เลยครับ");
+        await replyToLine(replyToken, "ขอโทษนะครับ รับรูปไม่ได้ ลองใหม่อีกครั้งได้เลยครับ");
       }
       continue;
     }
@@ -169,11 +167,24 @@ app.post("/webhook", async (req, res) => {
       continue;
     }
 
-    // ---- สนทนาปกติ ----
+    // ---- สนทนาปกติ (หรือถามเกี่ยวกับรูป) ----
     try {
       const history = getHistory(userId);
-      const chat = model.startChat({ history });
-      const result = await chat.sendMessage(userText);
+      let result;
+
+      if (pendingImages.has(userId)) {
+        // มีรูปค้างอยู่ → ส่งรูป + คำถามไปพร้อมกัน
+        const base64 = pendingImages.get(userId);
+        pendingImages.delete(userId);
+        result = await model.generateContent([
+          { inlineData: { data: base64, mimeType: "image/jpeg" } },
+          { text: userText },
+        ]);
+      } else {
+        const chat = model.startChat({ history });
+        result = await chat.sendMessage(userText);
+      }
+
       const aiReply = result.response.text();
 
       history.push({ role: "user", parts: [{ text: userText }] });
