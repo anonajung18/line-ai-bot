@@ -116,18 +116,48 @@ function getHistory(userId) {
   return chatHistory.get(userId);
 }
 
+// ---- ดาวน์โหลดรูปจาก Line ----
+async function downloadImage(messageId) {
+  const res = await fetch(`https://api-data.line.me/v2/bot/message/${messageId}/content`, {
+    headers: { Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}` },
+  });
+  const buffer = await res.arrayBuffer();
+  return Buffer.from(buffer).toString("base64");
+}
+
 // ---- Webhook ----
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
   for (const event of req.body.events) {
-    if (event.type !== "message" || event.message.type !== "text") continue;
+    if (event.type !== "message") continue;
+    const msgType = event.message.type;
+    if (msgType !== "text" && msgType !== "image") continue;
 
     const userId = event.source.userId;
-    const userText = event.message.text.trim();
     const replyToken = event.replyToken;
     const isAdmin = userId === process.env.ADMIN_USER_ID;
 
+    // ---- รูปภาพ ----
+    if (msgType === "image") {
+      try {
+        const base64 = await downloadImage(event.message.id);
+        const result = await model.generateContent([
+          { inlineData: { data: base64, mimeType: "image/jpeg" } },
+          { text: "ช่วยวิเคราะห์รูปนี้ให้หน่อยครับ บอกว่าเห็นอะไร มีปัญหาอะไรมั้ย และมีคำแนะนำอะไรบ้างครับ" },
+        ]);
+        const aiReply = result.response.text();
+        const displayName = await getDisplayName(userId);
+        addLog(userId, displayName, "[ส่งรูปภาพ]", aiReply);
+        await replyToLine(replyToken, aiReply);
+      } catch (err) {
+        console.error("Image error:", err.message);
+        await replyToLine(replyToken, "ขอโทษนะครับ วิเคราะห์รูปไม่ได้ ลองใหม่อีกครั้งได้เลยครับ");
+      }
+      continue;
+    }
+
+    const userText = event.message.text.trim();
     console.log(`[${userId}] ${userText}`);
 
     // ---- คำสั่งพิเศษ (admin เท่านั้น) ----
