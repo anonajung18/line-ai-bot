@@ -148,7 +148,7 @@ app.post("/webhook", async (req, res) => {
 
       history.push({ role: "user", parts: [{ text: userText }] });
       history.push({ role: "model", parts: [{ text: aiReply }] });
-      if (history.length > 20) history.splice(0, history.length - 20);
+      if (history.length > 10) history.splice(0, history.length - 10);
 
       const displayName = await getDisplayName(userId);
       addLog(userId, displayName, userText, aiReply);
