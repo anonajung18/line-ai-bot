@@ -1,6 +1,6 @@
+import "dotenv/config";
 import express from "express";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import crypto from "crypto";
 
 const app = express();
 app.use(express.json());
@@ -8,48 +8,80 @@ app.use(express.json());
 // ---- Gemini setup ----
 const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genai.getGenerativeModel({
-  model: "gemini-2.0-flash",
-  systemInstruction: `คุณเป็น AI ผู้ช่วยของครอบครัว ตอบภาษาไทยเป็นกันเอง สุภาพ เข้าใจง่าย
-ถ้าถามเรื่องทั่วไปก็ตอบได้เลย เช่น สูตรอาหาร สุขภาพ ข่าวสาร คำแนะนำต่างๆ
+  model: "gemini-3-flash-preview",
+  systemInstruction: `คุณเป็น AI ผู้ช่วยชายของครอบครัว ตอบภาษาไทยเป็นกันเอง ใช้คำลงท้าย "ครับ" เสมอ
+เชี่ยวชาญเรื่องเกษตร พืชผัก ปุ๋ย ยาฆ่าแมลง การทำสวน
+ตอบเรื่องทั่วไปได้ด้วย เช่น สุขภาพ ข่าวสาร คำแนะนำต่างๆ
 ถ้าไม่รู้หรือไม่แน่ใจให้บอกตรงๆ อย่าเดา`,
 });
 
-// เก็บประวัติสนทนาแยกต่อ user (จำ 20 ข้อความล่าสุด)
+// ---- เก็บ log รายวัน ----
+const dailyLogs = [];
+
+function addLog(userId, userText, aiReply) {
+  const time = new Date().toLocaleTimeString("th-TH", { timeZone: "Asia/Bangkok" });
+  dailyLogs.push({ time, userId, userText, aiReply: aiReply.slice(0, 60) + (aiReply.length > 60 ? "..." : "") });
+}
+
+// ---- Push message หา admin ----
+async function pushToAdmin(text) {
+  const adminId = process.env.ADMIN_USER_ID;
+  if (!adminId) return;
+  await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+    },
+    body: JSON.stringify({
+      to: adminId,
+      messages: [{ type: "text", text }],
+    }),
+  });
+}
+
+// ---- รายงานทุกวัน 08:00 น. (UTC+7) ----
+function scheduleDailyReport() {
+  const now = new Date();
+  const next = new Date();
+  // 08:00 น. ไทย = 01:00 UTC
+  next.setUTCHours(1, 0, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+
+  setTimeout(async () => {
+    const date = new Date().toLocaleDateString("th-TH", {
+      timeZone: "Asia/Bangkok",
+      day: "numeric", month: "long", year: "numeric",
+    });
+
+    let report;
+    if (dailyLogs.length === 0) {
+      report = `📊 รายงานประจำวัน ${date}\n\nไม่มีการสนทนาเมื่อวานครับ`;
+    } else {
+      const userCount = new Set(dailyLogs.map((l) => l.userId)).size;
+      const lines = dailyLogs.map((l) => `🕐 ${l.time}\n💬 ${l.userText}\n🤖 ${l.aiReply}`).join("\n─────────\n");
+      report = `📊 รายงานประจำวัน ${date}\n👥 ผู้ใช้ ${userCount} คน | 💬 ${dailyLogs.length} ข้อความ\n\n${lines}`;
+    }
+
+    await pushToAdmin(report);
+    dailyLogs.length = 0;
+    scheduleDailyReport();
+  }, next - now);
+}
+
+scheduleDailyReport();
+
+// ---- เก็บประวัติสนทนาแยกต่อ user ----
 const chatHistory = new Map();
 
 function getHistory(userId) {
-  if (!chatHistory.has(userId)) {
-    chatHistory.set(userId, []);
-  }
+  if (!chatHistory.has(userId)) chatHistory.set(userId, []);
   return chatHistory.get(userId);
 }
 
-// ---- Line signature verify ----
-function verifySignature(rawBody, signature) {
-  const hash = crypto
-    .createHmac("sha256", process.env.LINE_CHANNEL_SECRET)
-    .update(rawBody)
-    .digest("base64");
-  return hash === signature;
-}
-
-// ต้องอ่าน raw body ก่อน parse JSON เพื่อ verify signature
-app.use(
-  express.json({
-    verify: (req, _res, buf) => {
-      req.rawBody = buf;
-    },
-  })
-);
-
 // ---- Webhook ----
 app.post("/webhook", async (req, res) => {
-  const signature = req.headers["x-line-signature"];
-  if (!verifySignature(req.rawBody, signature)) {
-    return res.sendStatus(401);
-  }
-
-  res.sendStatus(200); // ตอบ Line ทันที (ต้องทำก่อน ไม่งั้น timeout)
+  res.sendStatus(200);
 
   for (const event of req.body.events) {
     if (event.type !== "message" || event.message.type !== "text") continue;
@@ -58,24 +90,23 @@ app.post("/webhook", async (req, res) => {
     const userText = event.message.text;
     const replyToken = event.replyToken;
 
+    console.log(`[userId: ${userId}] ${userText}`);
+
     try {
       const history = getHistory(userId);
-
-      // สนทนากับ Gemini พร้อมประวัติ
       const chat = model.startChat({ history });
       const result = await chat.sendMessage(userText);
       const aiReply = result.response.text();
 
-      // บันทึกประวัติ (เก็บแค่ 20 ข้อความล่าสุด)
       history.push({ role: "user", parts: [{ text: userText }] });
       history.push({ role: "model", parts: [{ text: aiReply }] });
       if (history.length > 20) history.splice(0, history.length - 20);
 
-      // ส่งกลับ Line
+      addLog(userId, userText, aiReply);
       await replyToLine(replyToken, aiReply);
     } catch (err) {
       console.error("Error:", err.message);
-      await replyToLine(replyToken, "ขอโทษนะคะ เกิดข้อผิดพลาด ลองใหม่อีกครั้งได้เลย");
+      await replyToLine(replyToken, "ขอโทษนะครับ เกิดข้อผิดพลาด ลองใหม่อีกครั้งได้เลยครับ");
     }
   }
 });
@@ -94,7 +125,6 @@ async function replyToLine(replyToken, text) {
   });
 }
 
-// Health check
 app.get("/", (_req, res) => res.send("Line AI Bot is running!"));
 
 const PORT = process.env.PORT || 3000;
