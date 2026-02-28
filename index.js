@@ -18,16 +18,33 @@ const model = genai.getGenerativeModel({
 // ---- เก็บ log พร้อม timestamp ----
 const logs = []; // { timestamp: Date, userId, userText, aiReply }
 
-function addLog(userId, userText, aiReply) {
+function addLog(userId, displayName, userText, aiReply) {
   logs.push({
     timestamp: new Date(),
     userId,
+    displayName,
     userText,
     aiReply: aiReply.slice(0, 80) + (aiReply.length > 80 ? "..." : ""),
   });
   // เก็บแค่ 7 วันย้อนหลัง
   const limit = Date.now() - 7 * 24 * 60 * 60 * 1000;
   while (logs.length > 0 && logs[0].timestamp.getTime() < limit) logs.shift();
+}
+
+// ดึงชื่อ Line ของ user
+const nameCache = new Map();
+async function getDisplayName(userId) {
+  if (nameCache.has(userId)) return nameCache.get(userId);
+  try {
+    const res = await fetch(`https://api.line.me/v2/bot/profile/${userId}`, {
+      headers: { Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}` },
+    });
+    const data = await res.json();
+    nameCache.set(userId, data.displayName || userId);
+    return data.displayName || userId;
+  } catch {
+    return userId;
+  }
 }
 
 function formatTime(date) {
@@ -42,7 +59,7 @@ function buildReport(filteredLogs, title) {
   if (filteredLogs.length === 0) return `${title}\n\nไม่มีการสนทนาครับ`;
   const userCount = new Set(filteredLogs.map((l) => l.userId)).size;
   const lines = filteredLogs
-    .map((l) => `🕐 ${formatTime(l.timestamp)}\n💬 ${l.userText}\n🤖 ${l.aiReply}`)
+    .map((l) => `🕐 ${formatTime(l.timestamp)} · ${l.displayName}\n💬 ${l.userText}\n🤖 ${l.aiReply}`)
     .join("\n─────────\n");
   return `${title}\n👥 ${userCount} คน | 💬 ${filteredLogs.length} ข้อความ\n\n${lines}`;
 }
@@ -133,7 +150,8 @@ app.post("/webhook", async (req, res) => {
       history.push({ role: "model", parts: [{ text: aiReply }] });
       if (history.length > 20) history.splice(0, history.length - 20);
 
-      addLog(userId, userText, aiReply);
+      const displayName = await getDisplayName(userId);
+      addLog(userId, displayName, userText, aiReply);
       await replyToLine(replyToken, aiReply);
     } catch (err) {
       console.error("Error:", err.message);
