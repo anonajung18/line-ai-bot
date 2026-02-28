@@ -9,7 +9,7 @@ app.use(express.json());
 // ---- Gemini setup ----
 const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genai.getGenerativeModel({
-  model: "gemini-2.5-flash",
+  model: "gemini-3-flash-preview",
   systemInstruction: `คุณเป็น AI ผู้ช่วยชายของครอบครัว ตอบภาษาไทยเป็นกันเอง ใช้คำลงท้าย "ครับ" เสมอ
 เชี่ยวชาญเรื่องเกษตร พืชผัก ปุ๋ย ยาฆ่าแมลง การทำสวน และการเดินทางในไทย
 ตอบเรื่องทั่วไปได้ด้วย เช่น สุขภาพ ข่าวสาร คำแนะนำต่างๆ
