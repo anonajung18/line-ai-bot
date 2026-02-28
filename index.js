@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { readFileSync, writeFileSync, existsSync } from "fs";
 
 const app = express();
 app.use(express.json());
@@ -10,14 +11,37 @@ const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genai.getGenerativeModel({
   model: "gemini-2.5-flash",
   systemInstruction: `คุณเป็น AI ผู้ช่วยชายของครอบครัว ตอบภาษาไทยเป็นกันเอง ใช้คำลงท้าย "ครับ" เสมอ
-เชี่ยวชาญเรื่องเกษตร พืชผัก ปุ๋ย ยาฆ่าแมลง การทำสวน
+เชี่ยวชาญเรื่องเกษตร พืชผัก ปุ๋ย ยาฆ่าแมลง การทำสวน และการเดินทางในไทย
 ตอบเรื่องทั่วไปได้ด้วย เช่น สุขภาพ ข่าวสาร คำแนะนำต่างๆ
-ถ้าไม่รู้หรือไม่แน่ใจให้บอกตรงๆ อย่าเดา
-ตอบสั้นๆ กระชับ ได้ใจความ ไม่เกิน 5-6 บรรทัด`,
+
+สิ่งที่ต้องทำเสมอ:
+- ตอบตรงๆ ชัดเจน ระบุตัวเลข เวลา ราคา เส้นทางที่แน่นอน
+- ตอบสั้นๆ กระชับ ไม่เกิน 5-6 บรรทัด
+- ถ้าไม่รู้จริงๆ บอกตรงๆ ว่าไม่รู้
+
+ห้ามทำ:
+- ห้ามตอบแบบอ้อมค้อม คลุมเครือ หรือบอกแค่ว่า "แล้วแต่คน" "ขึ้นอยู่กับ"
+- ห้ามแนะนำให้ปรึกษาผู้เชี่ยวชาญโดยไม่ตอบคำถามก่อน
+- ถ้าข้อมูลที่ขาดไปทำให้ตอบผิดได้ ให้ถามกลับ 1 คำถามสั้นๆ ก่อน เช่น "อยู่ฝั่งไหนครับ?" แต่ถ้าพอตอบได้ให้ตอบเลย`,
+  tools: [{ googleSearch: {} }],
 });
 
-// ---- เก็บ log พร้อม timestamp ----
-const logs = []; // { timestamp: Date, userId, userText, aiReply }
+// ---- เก็บ log พร้อม timestamp (persistent) ----
+const LOG_FILE = "./logs.json";
+
+function loadLogs() {
+  try {
+    if (!existsSync(LOG_FILE)) return [];
+    const raw = JSON.parse(readFileSync(LOG_FILE, "utf-8"));
+    return raw.map((l) => ({ ...l, timestamp: new Date(l.timestamp) }));
+  } catch { return []; }
+}
+
+function saveLogs() {
+  try { writeFileSync(LOG_FILE, JSON.stringify(logs)); } catch {}
+}
+
+const logs = loadLogs();
 
 function addLog(userId, displayName, userText, aiReply) {
   logs.push({
@@ -30,6 +54,7 @@ function addLog(userId, displayName, userText, aiReply) {
   // เก็บแค่ 7 วันย้อนหลัง
   const limit = Date.now() - 7 * 24 * 60 * 60 * 1000;
   while (logs.length > 0 && logs[0].timestamp.getTime() < limit) logs.shift();
+  saveLogs();
 }
 
 // ดึงชื่อ Line ของ user
