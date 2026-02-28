@@ -92,6 +92,19 @@ app.post("/webhook", async (req, res) => {
 
     console.log(`[userId: ${userId}] ${userText}`);
 
+    // คำสั่งพิเศษ: ส่ง "รายงาน" เพื่อดู log ทันที
+    if (userText === "รายงาน" && userId === process.env.ADMIN_USER_ID) {
+      const date = new Date().toLocaleDateString("th-TH", {
+        timeZone: "Asia/Bangkok", day: "numeric", month: "long", year: "numeric",
+      });
+      const report = dailyLogs.length === 0
+        ? `📊 รายงานวันนี้ ${date}\n\nยังไม่มีการสนทนาครับ`
+        : `📊 รายงานวันนี้ ${date}\n👥 ผู้ใช้ ${new Set(dailyLogs.map(l => l.userId)).size} คน | 💬 ${dailyLogs.length} ข้อความ\n\n` +
+          dailyLogs.map(l => `🕐 ${l.time}\n💬 ${l.userText}\n🤖 ${l.aiReply}`).join("\n─────────\n");
+      await replyToLine(replyToken, report);
+      continue;
+    }
+
     try {
       const history = getHistory(userId);
       const chat = model.startChat({ history });
